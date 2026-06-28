@@ -55,8 +55,13 @@ class ArbitrageBot:
         self.address = self.account.address
 
         # 3. 安全读取并初始化 pairCount
+        # 直接使用 active_w3 创建临时合约对象，绕过 @property 在 __init__ 中的调用
+        temp_contract = active_w3.eth.contract(
+            address=Web3.to_checksum_address(CONTRACT_ADDRESS),
+            abi=CONTRACT_ABI
+        )
         try:
-            self.pair_count = self.contract.functions.pairCount().call()
+            self.pair_count = temp_contract.functions.pairCount().call()
         except Exception as e:
             logger.error(f"❌ 启动失败：无法读取 pairCount，请确保合约地址和 ABI 正确: {e}")
             sys.exit(1)
