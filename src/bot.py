@@ -44,18 +44,17 @@ logger = logging.getLogger(__name__)
 
 class ArbitrageBot:
     def __init__(self):
+        # 1. 初始化主、备节点 Web3 实例
         self.w3_primary = self._init_web3(RPC_URL_1)
         self.w3_secondary = self._init_web3(RPC_URL_2)
         self.use_primary = True
 
+        # 2. 获取初始可工作的节点，读取钱包信息
         active_w3 = self._get_active_w3()
-        self.contract = active_w3.eth.contract(
-            address=Web3.to_checksum_address(CONTRACT_ADDRESS),
-            abi=CONTRACT_ABI
-        )
         self.account = active_w3.eth.account.from_key(PRIVATE_KEY)
         self.address = self.account.address
 
+        # 3. 安全读取并初始化 pairCount
         try:
             self.pair_count = self.contract.functions.pairCount().call()
         except Exception as e:
@@ -63,15 +62,19 @@ class ArbitrageBot:
             sys.exit(1)
 
         logger.info(f"🎉 Bot 启动成功 | 账户地址: {self.address} | 套利对数量: {self.pair_count}")
-        
         if self.pair_count == 0:
             logger.warning("⚠️ 警告：未检测到套利对配置，请先调用 setPairConfig 注入子弹！")
-        else:
-            # 🎯 核心升级：启动自检诊断雷达，抓出到底是哪一组套利对写错了
-            self._run_diagnostics()
+
+        # 🎯 核心升级：启动自检诊断雷达，抓出到底是哪一组套利对写错了
+        self._run_diagnostics()
 
     @property
     def contract(self):
+        """
+        🎯 核心 Bug 修复：利用 @property 属性黑魔法实现“动态合约绑定”。
+        每次调用 self.contract 时，都会自动使用当前最健康、已切换的活动 w3 实例来创建合约对象。
+        彻底规避 Web3.py 合约实例的“单节点终身制绑定死锁”！
+        """
         active_w3 = self._get_active_w3()
         return active_w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS),
@@ -91,6 +94,7 @@ class ArbitrageBot:
             return None
 
     def _get_active_w3(self):
+        """获取当前标记的活动节点"""
         if self.use_primary and self.w3_primary:
             return self.w3_primary
         if self.w3_secondary:
@@ -100,6 +104,7 @@ class ArbitrageBot:
         raise ConnectionError("❌ 致命错误：主备 RPC 节点全部失效！")
 
     def _switch_node(self):
+        """被动触发主备容灾切换"""
         if self.use_primary:
             if self.w3_secondary:
                 logger.warning("⚠️ 主节点连接异常，正在极速切换到备用节点...")
@@ -118,7 +123,7 @@ class ArbitrageBot:
 
     # 🎯 核心升级：装填全自检诊断雷达，挨个给你的子弹做体检
     def _run_diagnostics(self):
-        logger.info("⚙️ 正在启动‘装填全自检诊断雷达’，逐一测试 10 组套利对的健康度...")
+        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的健康度...")
         healthy_count = 0
         for i in range(self.pair_count):
             try:
@@ -134,7 +139,7 @@ class ArbitrageBot:
                 if not tiers:
                     logger.error(f"  [对子 {i}] ❌ 异常：Python 端 config.py 未配置该对子的 PAIR_BORROW_TIERS")
                     continue
-                borrow_amt = tiers[0] # 用第一档测试即可
+                borrow_amt = tiers[0]  # 用第一档测试即可
                 
                 # 3. 在链上模拟调用 getOutputAmount（测试方向 1）
                 output_alt = self.contract.functions.getOutputAmount(
@@ -158,6 +163,7 @@ class ArbitrageBot:
         w3 = self._get_active_w3()
         nonce = w3.eth.get_transaction_count(self.address, 'pending')
         
+        # 估算并打包
         gas_estimate = function_call.estimate_gas({'from': self.address})
         gas_limit = int(gas_estimate * gas_multiplier)
         gas_price = w3.eth.gas_price
@@ -179,7 +185,7 @@ class ArbitrageBot:
         logger.info("📡 雷达扫描已开启，正在进行超频盲冲检测...")
         while True:
             try:
-                # 调用 checkAllOpportunities 获取链下 0 Gas 利润模拟
+                # 🎯 动态调用：此处会动态、实时地使用最健康的节点进行 check 
                 result = self.contract.functions.checkAllOpportunities().call()
                 best_tiers, best_profits, directions = result
 
@@ -237,7 +243,7 @@ class ArbitrageBot:
                 break
             except Exception as e:
                 logger.error(f"🚨 主循环异常: {e}")
-                #                  被动触发节点切换，让程序自适应自愈，绝对不崩盘！                
+                # 被动触发节点切换，让程序自适应自愈，绝对不崩盘！
                 self._switch_node()
                 time.sleep(CHECK_INTERVAL)
 
