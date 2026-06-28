@@ -1,6 +1,8 @@
 import time
 import sys
 import logging
+import os
+from logging.handlers import RotatingFileHandler
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from config import (
@@ -16,9 +18,26 @@ from config import (
     CONTRACT_ABI,
 )
 
+# ==================== 日志配置 ====================
+LOG_DIR = os.getenv('LOG_DIR', '/app/logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# 控制台 Handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# 文件 Handler（自动轮转，每个文件最大 10MB，保留 5 个）
+file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, 'bot.log'),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5
+)
+file_handler.setLevel(logging.INFO)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[console_handler, file_handler]
 )
 logger = logging.getLogger(__name__)
 
@@ -66,7 +85,7 @@ class ArbitrageBot:
 
     def _get_active_w3(self):
         """
-        🎯 核心优化：被动式容灾切换。
+        核心优化：被动式容灾切换。
         平时直接返回活动实例，绝不在主循环中调用耗费额度的 w3.is_connected()！
         """
         if self.use_primary and self.w3_primary:
@@ -106,7 +125,7 @@ class ArbitrageBot:
         gas_limit = int(gas_estimate * gas_multiplier)
         gas_price = w3.eth.gas_price
 
-        # 🎯 核心 Bug 修复：必须调用 build_transaction 才能把 executeArbitrage 的 calldata 打包进交易！
+        # 必须调用 build_transaction 才能把 executeArbitrage 的 calldata 打包进交易！
         tx = function_call.build_transaction({
             'chainId': 42161,
             'from': self.address,
@@ -151,7 +170,7 @@ class ArbitrageBot:
                     if tier_idx == 99:
                         continue
 
-                    # 🎯 核心 Bug 修复：从本地 config 配置中安全提取对应档位，彻底规避 Solidity 元组越界
+                    # 从本地 config 配置中安全提取对应档位，彻底规避 Solidity 元组越界
                     tiers = PAIR_BORROW_TIERS.get(i)
                     if not tiers or tier_idx >= len(tiers):
                         logger.error(f"❌ 档位读取越界: pairId={i}, tierIdx={tier_idx}")
@@ -164,7 +183,7 @@ class ArbitrageBot:
                             i,
                             borrow_amount,
                             directions[i],
-                            True # 默认优先走 Balancer 0% 息渠道
+                            True  # 默认优先走 Balancer 0% 息渠道
                         )
                     )
                     executed = True
@@ -188,4 +207,3 @@ class ArbitrageBot:
 if __name__ == "__main__":
     bot = ArbitrageBot()
     bot.run()
-    
