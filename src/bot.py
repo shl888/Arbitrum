@@ -55,7 +55,6 @@ class ArbitrageBot:
         self.address = self.account.address
 
         # 3. 安全读取并初始化 pairCount
-        # 直接使用 active_w3 创建临时合约对象，绕过 @property 在 __init__ 中的调用
         temp_contract = active_w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS),
             abi=CONTRACT_ABI
@@ -69,9 +68,9 @@ class ArbitrageBot:
         logger.info(f"🎉 Bot 启动成功 | 账户地址: {self.address} | 套利对数量: {self.pair_count}")
         if self.pair_count == 0:
             logger.warning("⚠️ 警告：未检测到套利对配置，请先调用 setPairConfig 注入子弹！")
-
-        # 🎯 核心升级：启动自检诊断雷达，抓出到底是哪一组套利对写错了
-        self._run_diagnostics()
+        else:
+            # 启动自检诊断雷达
+            self._run_diagnostics()
 
     @property
     def contract(self):
@@ -126,32 +125,28 @@ class ArbitrageBot:
         decimals = PRECISION.get(precision_key, 10**18)
         return profit / decimals
 
-    # 🎯 核心升级：装填全自检诊断雷达，挨个给你的子弹做体检
+    # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 10 组子弹全部上膛
     def _run_diagnostics(self):
         logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的健康度...")
         healthy_count = 0
         for i in range(self.pair_count):
             try:
-                # 1. 读取当前的链上 pair 配置
                 pair_config = self.contract.functions.pairs(i).call()
                 pool_a, pool_b = pair_config[0], pair_config[1]
                 protocol_a, protocol_b = pair_config[2], pair_config[3]
                 fee_a, fee_b = pair_config[6], pair_config[7]
                 token_borrow, token_alt = pair_config[8], pair_config[9]
                 
-                # 2. 获取其借贷档位
                 tiers = PAIR_BORROW_TIERS.get(i)
                 if not tiers:
                     logger.error(f"  [对子 {i}] ❌ 异常：Python 端 config.py 未配置该对子的 PAIR_BORROW_TIERS")
                     continue
                 borrow_amt = tiers[0]  # 用第一档测试即可
                 
-                # 3. 在链上模拟调用 getOutputAmount（测试方向 1）
                 output_alt = self.contract.functions.getOutputAmount(
                     pool_a, protocol_a, token_borrow, token_alt, borrow_amt, fee_a
                 ).call()
                 
-                # 测试方向 2
                 self.contract.functions.getOutputAmount(
                     pool_b, protocol_b, token_alt, token_borrow, output_alt, fee_b
                 ).call()
@@ -164,33 +159,62 @@ class ArbitrageBot:
         
         logger.info(f"📊 自检完成：共 {self.pair_count} 组套利对，其中 {healthy_count} 组处于完美健康状态。")
 
-    def _send_transaction(self, function_call, gas_multiplier: float = 1.2):
+    def _send_transaction(self, function_call, pair_id: int, borrow_amount: int, profit_normalized: float, direction_str: str, gas_multiplier: float = 1.2):
         w3 = self._get_active_w3()
-        nonce = w3.eth.get_transaction_count(self.address, 'pending')
         
-        # 估算并打包
-        gas_estimate = function_call.estimate_gas({'from': self.address})
-        gas_limit = int(gas_estimate * gas_multiplier)
-        gas_price = w3.eth.gas_price
+        # 1. 尝试获取 Nonce (如果连不上，向上抛出触发节点切换)
+        try:
+            nonce = w3.eth.get_transaction_count(self.address, 'pending')
+        except Exception as e:
+            logger.error(f"❌ [网络异常] 无法获取 Nonce，准备触发节点主备自愈切换: {e}")
+            raise e
 
-        tx = function_call.build_transaction({
-            'chainId': 42161,
-            'from': self.address,
-            'nonce': nonce,
-            'gas': gas_limit,
-            'gasPrice': gas_price,
-        })
+        # 2. 🎯 核心优化：在本地模拟执行交易（eth_estimateGas）
+        try:
+            gas_estimate = function_call.estimate_gas({'from': self.address})
+        except Exception as e:
+            # 🎯 核心日志优化：如果发生了 revert，说明交易不赚钱或者被别人在毫秒内抢跑了
+            # 此时属于“安全网成功防御拦截”，我们打印出极度清晰的自检报告，【不向上抛出异常】，因此【绝对不切换节点】！
+            err_msg = str(e).lower()
+            if "execution reverted" in err_msg or "revert" in err_msg:
+                logger.warning(
+                    f"⚠️  [开火拦截] 交易前置模拟执行失败 (Revert) | pairId={pair_id} ({direction_str}) | "
+                    f"预期利润={profit_normalized:.6f} | 原因: 价格瞬时波动导致套利不盈利或已被抢跑。已自动放弃发送，成功节省 Gas 费！"
+                )
+            else:
+                logger.warning(f"⚠️  [开火拦截] 交易前置模拟发生未知异常，已拦截不发送: {e}")
+            return None # 优雅返回，终止发送，0 Gas 损耗
 
-        signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        logger.info(f"🚀 闪电贷套利开火成功！Hash: {tx_hash.hex()}")
-        return tx_hash
+        # 3. 只有 100% 模拟成功（有钱赚、能成功平仓）的交易，才会真正走到这里进行签名并打入定序器
+        try:
+            gas_limit = int(gas_estimate * gas_multiplier)
+            gas_price = w3.eth.gas_price
+
+            tx = function_call.build_transaction({
+                'chainId': 42161,
+                'from': self.address,
+                'nonce': nonce,
+                'gas': gas_limit,
+                'gasPrice': gas_price,
+            })
+
+            signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            logger.info(
+                f"🚀 [大吉大利，正式发射！] 闪电贷套利交易已成功发送到 Arbitrum 定序器！\n"
+                f"   👉 [交易详情] pairId={pair_id} ({direction_str}) | 数量={borrow_amount} | "
+                f"预计纯利润={profit_normalized:.6f} | 交易Hash: {tx_hash.hex()}"
+            )
+            return tx_hash
+        except Exception as e:
+            logger.error(f"❌ [签名或发送失败] 交易在开火阶段遭遇未知错误: {e}")
+            raise e
 
     def run(self):
         logger.info("📡 雷达扫描已开启，正在进行超频盲冲检测...")
         while True:
             try:
-                # 🎯 动态调用：此处会动态、实时地使用最健康的节点进行 check 
+                # 动态调用：此处会动态、实时地使用最健康的节点进行 check 
                 result = self.contract.functions.checkAllOpportunities().call()
                 best_tiers, best_profits, directions = result
 
@@ -212,9 +236,10 @@ class ArbitrageBot:
                     if profit_normalized < threshold:
                         continue
 
+                    direction_str = 'A→B' if directions[i] else 'B→A'
                     logger.info(
                         f"🔥 发现高换手套利利润！ | pairId={i} | 最佳档位={best_tiers[i]} | "
-                        f"估算净利润={profit_normalized:.6f} | 方向={'A→B' if directions[i] else 'B→A'}"
+                        f"估算净利润={profit_normalized:.6f} | 方向={direction_str}"
                     )
 
                     tier_idx = best_tiers[i]
@@ -227,13 +252,18 @@ class ArbitrageBot:
                         continue
                     borrow_amount = tiers[tier_idx]
 
+                    # 🎯 核心调用升级：把所有参数以及预计利润、方向字符串传给发送函数，实现最完美的精细化日志
                     self._send_transaction(
-                        self.contract.functions.executeArbitrage(
+                        function_call=self.contract.functions.executeArbitrage(
                             i,
                             borrow_amount,
                             directions[i],
                             True
-                        )
+                        ),
+                        pair_id=i,
+                        borrow_amount=borrow_amount,
+                        profit_normalized=profit_normalized,
+                        direction_str=direction_str
                     )
                     executed = True
 
@@ -248,7 +278,7 @@ class ArbitrageBot:
                 break
             except Exception as e:
                 logger.error(f"🚨 主循环异常: {e}")
-                # 被动触发节点切换，让程序自适应自愈，绝对不崩盘！
+                # 只有真正的 RPC 连接或调用崩溃，才会触发主备自动切换
                 self._switch_node()
                 time.sleep(CHECK_INTERVAL)
 
