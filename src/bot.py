@@ -159,7 +159,7 @@ class ArbitrageBot:
         
         logger.info(f"📊 自检完成：共 {self.pair_count} 组套利对，其中 {healthy_count} 组处于完美健康状态。")
 
-    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 5次，自动强行熔断
+    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 3次，自动强行熔断
     def _check_pending_receipts(self):
         if not self.pending_txs:
             return
@@ -191,15 +191,15 @@ class ArbitrageBot:
                     self.fail_counters[pair_id] = self.fail_counters.get(pair_id, 0) + 1
                     logger.warning(
                         f"❌ [链上回退] 交易在链上执行失败 (Revert) | pairId={pair_id} | "
-                        f"连续失败计数: {self.fail_counters[pair_id]}/5 | Hash: {tx_hash.hex()}"
+                        f"连续失败计数: {self.fail_counters[pair_id]}/3 | Hash: {tx_hash.hex()}"
                     )
                     
                     # 🎯 核心熔断判断：触发禁闭 10 分钟 (600秒)
-                    if self.fail_counters[pair_id] >= 5:
+                    if self.fail_counters[pair_id] >= 3:
                         self.jail_until[pair_id] = time.time() + 600
                         self.fail_counters[pair_id] = 0 # 进看守所后，清空计数器
                         logger.error(
-                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 5 次开火回退！"
+                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 3 次开火回退！"
                             f"   👉 极大概率发生滑点剧烈偏移、池子被毁或合约异常！"
                             f"   👉 合约已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！期间绝不进行初筛、不进行开火！"
                         )
