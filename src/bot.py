@@ -49,12 +49,17 @@ class ArbitrageBot:
         self.w3_secondary = self._init_web3(RPC_URL_2)
         self.use_primary = True
 
-        # 2. 获取初始可工作的节点，读取钱包信息
+        # 🎯 2. 初始化看守所、失败计数器、未决交易队列（熔断避险机制）
+        self.jail_until = {}       # 存储每个对子关禁闭的结束时间戳 {pairId: timestamp}
+        self.fail_counters = {}    # 存储每个对子连续链上失败的计数器 {pairId: count}
+        self.pending_txs = []      # 存储已经发出但还未确认的交易收据队列 [(tx_hash, pair_id, send_time)]
+
+        # 3. 获取初始可工作的节点，读取钱包信息
         active_w3 = self._get_active_w3()
         self.account = active_w3.eth.account.from_key(PRIVATE_KEY)
         self.address = self.account.address
 
-        # 3. 安全读取并初始化 pairCount
+        # 4. 安全读取并初始化 pairCount
         temp_contract = active_w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS),
             abi=CONTRACT_ABI
@@ -74,11 +79,7 @@ class ArbitrageBot:
 
     @property
     def contract(self):
-        """
-        🎯 属性黑魔法：实现“动态合约绑定”。
-        每次调用 self.contract 时，都会自动使用当前最健康、已切换的活动 w3 实例来创建合约对象。
-        彻底规避 Web3.py 合约实例的“单节点制绑定死锁”！
-        """
+        """动态合约绑定，自愈核心"""
         active_w3 = self._get_active_w3()
         return active_w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS),
@@ -125,7 +126,6 @@ class ArbitrageBot:
         decimals = PRECISION.get(precision_key, 10**18)
         return profit / decimals
 
-    # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 10 组参数配置全部通畅
     def _run_diagnostics(self):
         logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的链上连通性...")
         healthy_count = 0
@@ -141,7 +141,7 @@ class ArbitrageBot:
                 if not tiers:
                     logger.error(f"  [套利对 {i}] ❌ 异常：Python 端 config.py 未配置该套利对的 PAIR_BORROW_TIERS")
                     continue
-                borrow_amt = tiers[0]  # 用第一档测试即可
+                borrow_amt = tiers[0]
                 
                 output_alt = self.contract.functions.getOutputAmount(
                     pool_a, protocol_a, token_borrow, token_alt, borrow_amt, fee_a
@@ -159,35 +159,80 @@ class ArbitrageBot:
         
         logger.info(f"📊 自检完成：共 {self.pair_count} 组套利对，其中 {healthy_count} 组处于完美健康状态。")
 
+    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 5次，自动强行熔断
+    def _check_pending_receipts(self):
+        if not self.pending_txs:
+            return
+
+        w3 = self._get_active_w3()
+        active_pending = []
+
+        for tx_hash, pair_id, send_time in self.pending_txs:
+            try:
+                receipt = w3.eth.get_transaction_receipt(tx_hash)
+                
+                # 交易仍在排队中
+                if receipt is None:
+                    # 容灾：如果在 L2 上发了 60 秒都还没出收据，可能发生卡死，丢弃不再跟踪，防止内存队列膨胀
+                    if time.time() - send_time < 60:
+                        active_pending.append((tx_hash, pair_id, send_time))
+                    else:
+                        logger.warning(f"⏳ 交易超时未被定序器打包，放弃跟踪其收据。Hash: {tx_hash.hex()}")
+                    continue
+                
+                # 收到链上执行回执！
+                status = receipt.get('status')
+                
+                if status == 1:
+                    logger.info(f"💰 [大吉大利！] 链上套利交易已成功确认并平仓获利！Hash: {tx_hash.hex()}")
+                    # 只要有一次成功，立刻清空该对子的失败计数
+                    self.fail_counters[pair_id] = 0
+                elif status == 0:
+                    self.fail_counters[pair_id] = self.fail_counters.get(pair_id, 0) + 1
+                    logger.warning(
+                        f"❌ [链上回退] 交易在链上执行失败 (Revert) | pairId={pair_id} | "
+                        f"连续失败计数: {self.fail_counters[pair_id]}/5 | Hash: {tx_hash.hex()}"
+                    )
+                    
+                    # 🎯 核心熔断判断：触发禁闭 10 分钟 (600秒)
+                    if self.fail_counters[pair_id] >= 5:
+                        self.jail_until[pair_id] = time.time() + 600
+                        self.fail_counters[pair_id] = 0 # 进看守所后，清空计数器
+                        logger.error(
+                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 5 次开火回退！"
+                            f"   👉 极大概率发生滑点剧烈偏移、池子被毁或合约异常！"
+                            f"   👉 合约已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！期间绝不进行初筛、不进行开火！"
+                        )
+
+            except Exception as e:
+                # 发生网络读取错误，保留在队列里，下一轮继续探测
+                active_pending.append((tx_hash, pair_id, send_time))
+
+        self.pending_txs = active_pending
+
     def _send_transaction(self, function_call, pair_id: int, borrow_amount: int, profit_normalized: float, direction_str: str, gas_limit: int = 1200000):
-        """
-        🚀 极速直发模式 (Direct Fire Mode)：
-        一刀切除耗时 100ms 的 estimate_gas (精筛) 步骤，
-        直接使用预设的 120 万 Gas 限制（EVM未消耗完的部分会自动退还，不需担心多扣费），
-        在【复筛】通过后，以最快速度直接签名并发射，实现雷霆一击！
-        """
         w3 = self._get_active_w3()
         
-        # 1. 尝试获取 Nonce (如果连不上，向上抛出触发节点自愈切换)
         try:
             nonce = w3.eth.get_transaction_count(self.address, 'pending')
         except Exception as e:
             logger.error(f"❌ [网络异常] 无法获取 Nonce，准备触发节点主备自愈切换: {e}")
             raise e
 
-        # 2. 🎯 极限升级：彻底切除拖慢速度的 estimate_gas 精筛流程，直接以 0 延迟构建真实交易
         try:
             gas_price = w3.eth.gas_price
+            max_fee_per_gas = int(gas_price * 2.0)
+            max_priority_fee_per_gas = w3.to_wei(0.01, 'gwei')
 
             tx = function_call.build_transaction({
                 'chainId': 42161,
                 'from': self.address,
                 'nonce': nonce,
-                'gas': gas_limit,      # 🎯 直接强行硬编码 Gas 上限，0 毫秒延迟，未用完的 Gas 会在执行后退回
-                'gasPrice': gas_price,
+                'gas': gas_limit,     
+                'maxFeePerGas': max_fee_per_gas,
+                'maxPriorityFeePerGas': max_priority_fee_per_gas,
             })
 
-            # 3. 🎯 修复：将 signed_tx.raw_transaction 完美修改为 Web3.py 标准的驼峰命名 signed_tx.rawTransaction！
             signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
             tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             
@@ -196,22 +241,32 @@ class ArbitrageBot:
                 f"   👉 [交易详情] pairId={pair_id} ({direction_str}) | 借款数量={borrow_amount} | "
                 f"预计纯利润={profit_normalized:.6f} | 交易Hash: {tx_hash.hex()}"
             )
+            
+            # 🎯 登记到未决交易队列中，以便在后台异步监测它的执行结果，防止死循环空枪放血
+            self.pending_txs.append((tx_hash, pair_id, time.time()))
             return tx_hash
         except Exception as e:
-            logger.error(f"❌ [开火失败] 交易在签名或发送阶段发生未知错误: {e}")
-            raise e
+            logger.error(f"❌ [开火失败] 交易在签名或发送阶段发生错误，放弃本次发射: {e}")
+            return None
 
     def run(self):
-        # 初筛时，会对全量套利对，双向，3个不同档位的资金进行利润检测。不考虑实际滑点
         logger.info("📡 雷达扫描已开启，正在进行全量初筛/超频盲冲检测...")
         while True:
             try:
-                # 1. 🎯 初筛：调用 checkAllOpportunities
+                # 🎯 核心优化：每次循环的最开头，先异步结算所有排队中的交易结果，更新看守所名单
+                self._check_pending_receipts()
+
                 result = self.contract.functions.checkAllOpportunities().call()
                 best_tiers, best_profits, directions = result
 
                 executed = False
                 for i in range(self.pair_count):
+                    # 🎯 核心优化：检查当前套利对是否被关了禁闭
+                    jail_time = self.jail_until.get(i, 0)
+                    if time.time() < jail_time:
+                        # 尚在 10 分钟禁闭期内，完全忽略不予理睬，0 开枪消耗！
+                        continue
+
                     profit_raw = best_profits[i]
                     if profit_raw == 0:
                         continue
@@ -225,7 +280,7 @@ class ArbitrageBot:
                     else:
                         threshold = MIN_PROFIT_THRESHOLD_WBTC
 
-                    # 🎯 2. 复筛：本地通过最小利润阈值进行过滤，保障利润覆盖 Gas 并过滤微小噪音
+                    # 2. 复筛过滤
                     if profit_normalized < threshold:
                         continue
 
@@ -245,7 +300,7 @@ class ArbitrageBot:
                         continue
                     borrow_amount = tiers[tier_idx]
 
-                    # 🎯 3. 开火：直接雷霆开枪，不经过 estimate_gas 精筛，在合约内用安全 revert 兜底
+                    # 3. 极速直发开火
                     self._send_transaction(
                         function_call=self.contract.functions.executeArbitrage(
                             i,
