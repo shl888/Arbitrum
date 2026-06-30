@@ -76,7 +76,7 @@ class ArbitrageBot:
     def contract(self):
         """
         🎯 属性黑魔法：实现“动态合约绑定”。
-        每次调用 self.contract 时，都会自动使用当前最健康的活动 w3 实例来创建合约对象。
+        每次调用 self.contract 时，都会自动使用当前最健康、已切换的活动 w3 实例来创建合约对象。
         彻底规避 Web3.py 合约实例的“单节点制绑定死锁”！
         """
         active_w3 = self._get_active_w3()
@@ -183,13 +183,13 @@ class ArbitrageBot:
                 'chainId': 42161,
                 'from': self.address,
                 'nonce': nonce,
-                'gas': gas_limit,     # 🎯 直接强行硬编码 Gas 上限，0 毫秒延迟，未用完的 Gas 会在执行后退回
+                'gas': gas_limit,     // 🎯 直接强行硬编码 Gas 上限，0 毫秒延迟，未用完的 Gas 会在执行后退回
                 'gasPrice': gas_price,
             })
 
-            # 3. 签名并直接雷霆发射！
+            # 3. 🎯 修复：将 signed_tx.raw_transaction 完美修改为 Web3.py 标准的驼峰命名 signed_tx.rawTransaction！
             signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             
             logger.info(
                 f"🚀 [大吉大利，雷霆发射！] 闪电贷套利交易已直接打入 Arbitrum 定序器！\n"
