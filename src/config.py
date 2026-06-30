@@ -11,6 +11,8 @@ PRIVATE_KEY = os.getenv('OPERATOR_PRIVATE_KEY')
 CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
 
 # 最小利润门槛（币本位）
+# 取自至少能够覆盖gas费，可自定义。
+# 这是服务器程序，对套利合约的初筛结果，进行复筛用的，因为初筛的通过标准，只是理论利润大于0，但是未必值得交易，所以有了复筛，通过复筛门槛的套利机会，会被直接执行真实交易。
 # WETH 本位（第1-7组）：0.00006 WETH ≈ 0.1 美元
 # WBTC 本位（第8-10组）：0.0000016 WBTC ≈ 0.1 美元
 MIN_PROFIT_THRESHOLD_WETH = float(os.getenv('MIN_PROFIT_THRESHOLD_WETH', 0.00006))
@@ -38,7 +40,7 @@ PAIR_PRECISION = {
     9: 'WBTC',  # WBTC/tBTC
 }
 
-# 每组套利对对应的利润阈值类型
+# 每组套利对对应的利润币种类型
 PAIR_THRESHOLD_TYPE = {
     0: 'WETH',
     1: 'WETH',
@@ -52,7 +54,7 @@ PAIR_THRESHOLD_TYPE = {
     9: 'WBTC',
 }
 
-# 在 Python 端对齐 setPairConfig 中配置的真实物理档位
+# 在 Python 端对齐 setPairConfig 中配置的真实物理档位，这里的档位是套利合约所使用的参数副本，是用来映射，用来解决套利合约失忆，记不住初筛，精筛时所用档位的机制的问题。必须与套利合约所用的参数一致。
 PAIR_BORROW_TIERS = {
      0: [10000000000000000, 30000000000000000, 50000000000000000],  # 0.01, 0.03, 0.05 WETH
      1: [10000000000000000, 30000000000000000, 50000000000000000],  # 0.01, 0.03, 0.05 WETH
