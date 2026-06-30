@@ -13,8 +13,8 @@ CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
 # 最小利润门槛（币本位）
 # 取自至少能够覆盖gas费，可自定义。
 # 这是服务器程序，对套利合约的初筛结果，进行复筛用的，因为初筛的通过标准，只是理论利润大于0，但是未必值得交易，所以有了复筛，通过复筛门槛的套利机会，会被直接执行真实交易。
-# WETH 本位（第1-7组）：0.0006 WETH ≈ 1 美元
-# WBTC 本位（第8-10组）：0.000016 WBTC ≈ 1 美元
+# WETH 本位（第1-7组）：0.0003 WETH ≈ 0.5 美元
+# WBTC 本位（第8-10组）：0.000008 WBTC ≈ 0.5 美元
 MIN_PROFIT_THRESHOLD_WETH = float(os.getenv('MIN_PROFIT_THRESHOLD_WETH', 0.0006))
 MIN_PROFIT_THRESHOLD_WBTC = float(os.getenv('MIN_PROFIT_THRESHOLD_WBTC', 0.000016))
 
