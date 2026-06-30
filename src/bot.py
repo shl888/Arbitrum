@@ -183,7 +183,7 @@ class ArbitrageBot:
                 'chainId': 42161,
                 'from': self.address,
                 'nonce': nonce,
-                'gas': gas_limit,     // 🎯 直接强行硬编码 Gas 上限，0 毫秒延迟，未用完的 Gas 会在执行后退回
+                'gas': gas_limit,      # 🎯 直接强行硬编码 Gas 上限，0 毫秒延迟，未用完的 Gas 会在执行后退回
                 'gasPrice': gas_price,
             })
 
