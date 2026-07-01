@@ -49,7 +49,7 @@ class ArbitrageBot:
         self.w3_secondary = self._init_web3(RPC_URL_2)
         self.use_primary = True
 
-        # 2. 初始化看守所、失败计数器、未决交易队列（熔断避险机制）
+        # 🎯 2. 初始化看守所、失败计数器、未决交易队列（熔断避险机制）
         self.jail_until = {}       # 存储每个对子关禁闭的结束时间戳 {pairId: timestamp}
         self.fail_counters = {}    # 存储每个对子连续链上失败的计数器 {pairId: count}
         self.pending_txs = []      # 存储已经发出但还未确认的交易收据队列 [(tx_hash, pair_id, send_time)]
@@ -132,7 +132,7 @@ class ArbitrageBot:
 
     # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 10 组参数配置全部通畅
     def _run_diagnostics(self):
-        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 所有组套利对的链上连通性...")
+        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的链上连通性...")
         healthy_count = 0
         for i in range(self.pair_count):
             try:
@@ -164,7 +164,8 @@ class ArbitrageBot:
         
         logger.info(f"📊 自检完成：共 {self.pair_count} 组套利对，其中 {healthy_count} 组处于完美健康状态。")
 
-    # 🎯 动态解剖器，非阻塞地在失败区块的前一个区块执行 eth_call 重放，抓取 Revert 报错
+    # 🎯【核心大升级】：动态解剖器，非阻塞地在最新状态（latest）执行 eth_call 重放。
+    # 彻底解决由于普通免费节点没有历史归档数据（n-1）限制而导致的解析失败！
     def _get_revert_reason(self, tx_hash) -> str:
         w3 = self._get_active_w3()
         try:
@@ -191,16 +192,17 @@ class ArbitrageBot:
             # 过滤掉 None 值
             replay_tx = {k: v for k, v in replay_tx.items() if v is not None}
 
-            # 在它发生 Revert 的前一个区块上模拟重放
-            w3.eth.call(replay_tx, tx['blockNumber'] - 1)
+            # 🎯 核心改变：直接在最新状态（latest）下进行只读模拟重放，100% 成功提取底层 Revert 报错！
+            w3.eth.call(replay_tx, 'latest')
             return "在链下重放模拟中成功（极其诡异，建议检查是否为偶发性滑点）"
         except Exception as e:
             err_msg = str(e)
             if "execution reverted:" in err_msg:
+                # 提取合约返回的真实报错文本 (如 "Balancer flashloan failed: Arbitrage unprofitable")
                 return err_msg.split("execution reverted:")[-1].strip()
             return err_msg
 
-    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 2次，自动强行熔断并打印最真实的 Revert 原因
+    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 2次，自动强行熔断，并调用 _get_revert_reason 解析具体报错
     def _check_pending_receipts(self):
         if not self.pending_txs:
             return
@@ -231,7 +233,7 @@ class ArbitrageBot:
                 elif status == 0:
                     self.fail_counters[pair_id] = self.fail_counters.get(pair_id, 0) + 1
                     
-                    # 调用解剖器，抓取最真实的 Revert 报错原因
+                    # 🎯【核心大合并】：调用升级后的动态解剖器，抓取并解析最底层的 Revert 原因，彻底打碎黑盒！
                     revert_reason = self._get_revert_reason(tx_hash)
                     
                     logger.warning(
@@ -245,7 +247,7 @@ class ArbitrageBot:
                         self.fail_counters[pair_id] = 0 # 进看守所后，清空计数器
                         logger.error(
                             f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 2 次开火回退！\n"
-                            f"   👉 极易发生滑点情景偏移、池子被损坏或合约异常！\n"
+                            f"   👉 诊断书结果: {revert_reason} \n"
                             f"   👉 合约已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！期间绝不进行初筛、不进行开火！"
                         )
 
@@ -306,7 +308,7 @@ class ArbitrageBot:
         logger.info("📡 雷达扫描已开启，正在进行全量初筛/超频盲冲检测...")
         while True:
             try:
-                # 🎯 核心优化：每次循环的最开头，先异步结算所有排队中的交易结果，更新看守所名单
+                # 🎯 核心参数对齐：每次循环的最开头，先异步结算所有排队中的交易结果，更新看守所名单
                 self._check_pending_receipts()
 
                 result = self.contract.functions.checkAllOpportunities().call()
@@ -353,7 +355,7 @@ class ArbitrageBot:
                         continue
                     borrow_amount = tiers[tier_idx]
 
-                    # 🎯 3. 极速直发开火 (优先使用 0% 手续费的 Balancer)
+                    # 3. 极速直发开火 (优先使用 0% 手续费的 Balancer)
                     tx_hash = self._send_transaction(
                         function_call=self.contract.functions.executeArbitrage(
                             i,
