@@ -54,12 +54,15 @@ class ArbitrageBot:
         self.fail_counters = {}    # 存储每个对子连续链上失败的计数器 {pairId: count}
         self.pending_txs = []      # 存储已经发出但还未确认的交易收据队列 [(tx_hash, pair_id, send_time)]
 
-        # 3. 获取初始可工作的节点，读取钱包信息
+        # 🆕 3. 贷源决策脑：存储强行改走 Aave 备弹仓的套利对 {pairId: False}
+        self.use_balancer_override = {}
+
+        # 4. 获取初始可工作的节点，读取钱包信息
         active_w3 = self._get_active_w3()
         self.account = active_w3.eth.account.from_key(PRIVATE_KEY)
         self.address = self.account.address
 
-        # 4. 安全读取并初始化 pairCount
+        # 5. 安全读取并初始化 pairCount
         temp_contract = active_w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS),
             abi=CONTRACT_ABI
@@ -130,8 +133,48 @@ class ArbitrageBot:
         decimals = PRECISION.get(precision_key, 10**18)
         return profit / decimals
 
-    # 🎯 自检诊断雷达：保持 getOutputAmount 连通性测试通畅
+    # 🆕 6. 贷源心跳探针：零 Gas 实时嗅探 Balancer 银行的库存
+    def _probe_lender_liveness(self):
+        logger.info("🏥 正在对主银行（Balancer Vault）进行实时库存与心跳健康探测...")
+        w3 = self._get_active_w3()
+        
+        # 物理代币与金库地址
+        weth_addr = Web3.to_checksum_address("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")
+        wbtc_addr = Web3.to_checksum_address("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f")
+        balancer_vault = Web3.to_checksum_address("0xBA12222222228d8Ba445958a75A0704d566BF2C8")
+        
+        # 极简 ERC20 只读 ABI
+        min_erc20_abi = [
+            {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}
+        ]
+        
+        try:
+            weth_contract = w3.eth.contract(address=weth_addr, abi=min_erc20_abi)
+            wbtc_contract = w3.eth.contract(address=wbtc_addr, abi=min_erc20_abi)
+            
+            # 读取金库的真实可用储备
+            vault_weth = weth_contract.functions.balanceOf(balancer_vault).call()
+            vault_wbtc = wbtc_contract.functions.balanceOf(balancer_vault).call()
+            
+            logger.info(f"  [金库状态] 💚 Balancer WETH 库存: {vault_weth / 10**18:.2f} | WBTC 库存: {vault_wbtc / 10**8:.4f}")
+            
+            # 如果金库发生不可抗力导致余额干涸（比如小于 0.1 WETH），直接启动全局自愈拉黑，强制走 Aave！
+            if vault_weth < 10**17:
+                logger.warning("  ⚠️ 警告：Balancer 金库 WETH 库存异常干涸！系统已触发全局预防拉黑，改走 Aave V3 备弹仓！")
+                for i in range(self.pair_count):
+                    self.use_balancer_override[i] = False
+            else:
+                # 状态良好，确保清空历史拉黑
+                self.use_balancer_override.clear()
+                
+        except Exception as e:
+            logger.warning(f"  ⚠️ 金库心跳探测发生异常 (节点可能瞬时延迟): {e}。系统将默认信赖当前通道状态。")
+
+    # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 9 组参数配置全部通畅
     def _run_diagnostics(self):
+        # 🆕 先行触发银行主动心跳嗅探
+        self._probe_lender_liveness()
+        
         logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试各套利对的链上连通性...")
         healthy_count = 0
         for i in range(self.pair_count):
@@ -139,14 +182,14 @@ class ArbitrageBot:
                 pair_config = self.contract.functions.pairs(i).call()
                 pool_a, pool_b = pair_config[0], pair_config[1]
                 if pool_a == "0x0000000000000000000000000000000000000000":
-                    continue # 完美包容空指针（比如 pairId=0 的情况）
+                    continue # 完美包容空指针情况
                 protocol_a, protocol_b = pair_config[2], pair_config[3]
                 fee_a, fee_b = pair_config[6], pair_config[7]
                 token_borrow, token_alt = pair_config[8], pair_config[9]
                 
                 tiers = PAIR_BORROW_TIERS.get(i)
                 if not tiers:
-                    logger.error(f"  [套利对 {i}] ❌ 异常：Python 端 config.py 未配置该套利对的 PAIR_BORROW_TIERS")
+                    logger.error(f"  [套利对 {i}] ❌ 异常：config.py 未配置 PAIR_BORROW_TIERS")
                     continue
                 borrow_amt = tiers[0]  # 用第一档测试即可
                 
@@ -166,7 +209,7 @@ class ArbitrageBot:
         
         logger.info(f"📊 自检完成：共检测到配置的有效套利对中，有 {healthy_count} 组处于完美健康状态。")
 
-    # 🎯 动态解剖器：非阻塞地在最新状态（latest）执行 eth_call 重放，并增加原始 Hex 自动解码功能
+    # 🎯 动态解剖器：非阻塞地在最新状态（latest）执行 eth_call 重放，并支持 Hex data 自动解密
     def _get_revert_reason(self, tx_hash) -> str:
         w3 = self._get_active_w3()
         try:
@@ -191,11 +234,10 @@ class ArbitrageBot:
 
             replay_tx = {k: v for k, v in replay_tx.items() if v is not None}
 
-            # 链下重放模拟
             w3.eth.call(replay_tx, 'latest')
             return "在链下重放模拟中成功（极其诡异，建议检查是否为偶发性滑点）"
         except Exception as e:
-            # 🎯 升级：主动从小狐狸/节点的底层报错对象中扣出 Hex Data，进行精准解码
+            # 🎯 提取并解密原始 json-rpc 回滚 Hex Data
             raw_data = None
             if hasattr(e, 'data'):
                 raw_data = e.data
@@ -205,12 +247,11 @@ class ArbitrageBot:
             if raw_data:
                 if isinstance(raw_data, str) and raw_data.startswith('0x'):
                     try:
-                        # 0x08c379a0 为标准的 Error(string) 报错 Selector 签名
                         if raw_data.startswith('0x08c379a0'):
                             decoded = w3.codec.decode(['string'], bytes.fromhex(raw_data[10:]))
                             return f"解密底层报错: {decoded[0]}"
                         else:
-                            return f"原始报错 Hex (非标/自定义错误，可在Arbiscan对齐): {raw_data}"
+                            return f"原始报错 Hex: {raw_data}"
                     except Exception as decode_err:
                         return f"解析报错Hex失败: {raw_data} | Error: {decode_err}"
                 return f"底层异常原始数据: {raw_data}"
@@ -220,7 +261,7 @@ class ArbitrageBot:
                 return err_msg.split("execution reverted:")[-1].strip()
             return err_msg
 
-    # 🎯 异步非阻塞收据追踪，一旦发现某个对子连续 Revert 2次，自动熔断看守
+    # 🎯 异步非阻塞收据追踪，一旦发现某个对子在链上 Revert 2次，自动熔断看守
     def _check_pending_receipts(self):
         if not self.pending_txs:
             return
@@ -232,7 +273,6 @@ class ArbitrageBot:
             try:
                 receipt = w3.eth.get_transaction_receipt(tx_hash)
                 
-                # 交易仍在定序器排队中
                 if receipt is None:
                     if time.time() - send_time < 60:
                         active_pending.append((tx_hash, pair_id, send_time))
@@ -240,12 +280,11 @@ class ArbitrageBot:
                         logger.warning(f"⏳ 交易超时未被定序器打包，放弃跟踪。Hash: {tx_hash.hex()}")
                     continue
                 
-                # 收到链上执行回执
                 status = receipt.get('status')
                 
                 if status == 1:
                     logger.info(f"💰 [大吉大利！] 链上套利交易已成功确认并平仓获利！Hash: {tx_hash.hex()}")
-                    self.fail_counters[pair_id] = 0 # 清空失败计数
+                    self.fail_counters[pair_id] = 0
                 elif status == 0:
                     self.fail_counters[pair_id] = self.fail_counters.get(pair_id, 0) + 1
                     revert_reason = self._get_revert_reason(tx_hash)
@@ -255,13 +294,21 @@ class ArbitrageBot:
                         f"   👉 [详情] 连续失败计数: {self.fail_counters[pair_id]}/2 | 报错原因: {revert_reason} | Hash: {tx_hash.hex()}"
                     )
                     
+                    # 🆕 觉醒自愈：如果解剖出是 Balancer 银行出的硬伤，立刻在下一轮强行拉黑，不关套利对禁闭！
+                    if "BAL" in revert_reason or "Balancer" in revert_reason:
+                        self.use_balancer_override[pair_id] = False
+                        logger.error(
+                            f"🔄 [雷达动态调整] 检测到 Balancer 银行硬伤回滚: {revert_reason}！\n"
+                            f"   👉 系统已强行拉黑该对子 {pair_id} 的 Balancer 接口，下一轮扫描直接强制走 Aave 备用弹仓发射！"
+                        )
+                        self.fail_counters[pair_id] = 0 # 既然定位并排除了病因，清空连续失败数，下轮继续打！
+                    
                     # 触发 10 分钟禁闭熔断
-                    if self.fail_counters[pair_id] >= 2:
+                    elif self.fail_counters[pair_id] >= 2:
                         self.jail_until[pair_id] = time.time() + 600
                         self.fail_counters[pair_id] = 0
                         logger.error(
-                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 2 次开火回退！\n"
-                            f"   👉 诊断书结果: {revert_reason} \n"
+                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 2 次非银行回退（滑点问题）！\n"
                             f"   👉 已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！"
                         )
 
@@ -271,11 +318,7 @@ class ArbitrageBot:
         self.pending_txs = active_pending
 
     def _send_transaction(self, function_call, pair_id: int, borrow_amount: int, profit_normalized: float, direction_str: str, gas_limit: int = 1200000):
-        """
-        🚀 极速直发模式 (Direct Fire Mode)：直接以预设 120 万 Gas 限制直发，实现雷霆一击
-        """
         w3 = self._get_active_w3()
-        
         try:
             nonce = w3.eth.get_transaction_count(self.address, 'pending')
         except Exception as e:
@@ -312,15 +355,9 @@ class ArbitrageBot:
             return None
 
     def _process_pair_matrix(self, pair_id: int, profits_true: list, profits_false: list) -> bool:
-        """
-        🎯 核心决策模块：全量矩阵分析
-        针对第 pair_id 组套利对的双向利润，从【档位0到最大档位】顺序扫描，
-        寻找第一个满足“安全优先（滑点最小）”且跑赢 Gas 利润门槛的档位进行击发！
-        """
         if not profits_true or not profits_false:
             return False
 
-        # 读取该套利对对应的本位币过滤门槛
         threshold_type = PAIR_THRESHOLD_TYPE.get(pair_id, 'WETH')
         if threshold_type == 'WETH':
             threshold = MIN_PROFIT_THRESHOLD_WETH
@@ -358,22 +395,21 @@ class ArbitrageBot:
         return False
 
     def _fire_arbitrage(self, pair_id: int, tier_idx: int, direction: bool, profit_normalized: float, direction_str: str) -> bool:
-        """
-        🎯 开火总控：打包交易指令，并内建多贷源（Balancer 0息 / Aave备用）自动容灾降级
-        """
         tiers = PAIR_BORROW_TIERS.get(pair_id)
         if not tiers or tier_idx >= len(tiers):
             logger.error(f"❌ 资金档位读取越界: pairId={pair_id}, tierIdx={tier_idx}")
             return False
         borrow_amount = tiers[tier_idx]
 
-        # 优先使用 0% 手续费的 Balancer 通道极速开火
+        # 🆕 觉醒动态贷源：默认走 Balancer(True)，一旦其在诊断或上一轮被拉黑，下一轮起直接变成 False 走 Aave 开火！
+        use_balancer = self.use_balancer_override.get(pair_id, True)
+
         tx_hash = self._send_transaction(
             function_call=self.contract.functions.executeArbitrage(
                 pair_id,
                 borrow_amount,
                 direction,
-                True  # useBalancer = True
+                use_balancer  # 👈 动态决策
             ),
             pair_id=pair_id,
             borrow_amount=borrow_amount,
@@ -381,24 +417,24 @@ class ArbitrageBot:
             direction_str=direction_str
         )
         
-        # 降级容灾：如果 Balancer 因为各种不可抗力借不出来，且该套利对未被禁闭
+        # 降级容灾：如果在本地/前置构建阶段被拦截（依然作为最后防线保留）
         if tx_hash is None:
             current_jail_time = self.jail_until.get(pair_id, 0)
             if time.time() < current_jail_time:
-                return False # 已经在上面失败的处理中被熔断拉进看守所了
+                return False
                 
             logger.info(
-                f"🔄 [贷源自愈降级] pairId={pair_id} | Balancer 0息通道借贷遇阻，"
-                f"正在极速自动降级调用 Aave V3 备用通道重试！"
+                f"🔄 [贷源自愈降级] pairId={pair_id} | 签名/前置校验遇阻，已将 Balancer 列入冷宫并改走 Aave 重试！"
             )
+            # 顺手把 Balancer 强制拉黑
+            self.use_balancer_override[pair_id] = False
             
-            # 瞬间向 Aave V3 发起第二轮雷霆狙击
             self._send_transaction(
                 function_call=self.contract.functions.executeArbitrage(
                     pair_id,
                     borrow_amount,
                     direction,
-                    False  # useBalancer = False (调用 Aave)
+                    False  # 改走 Aave
                 ),
                 pair_id=pair_id,
                 borrow_amount=borrow_amount,
@@ -409,36 +445,40 @@ class ArbitrageBot:
 
     def run(self):
         logger.info("📡 雷达扫描已开启，正在进行全量二维矩阵初筛/超频盲冲检测...")
+        
+        # 🆕 新增：每隔大约 1 小时，自动在后台悄悄重置并重新做一次“金库健康心跳嗅探”
+        last_heartbeat_time = time.time()
+        
         while True:
             try:
                 # 🎯 每次扫描前，先异步结算所有排队中的交易结果，更新看守所名单
                 self._check_pending_receipts()
 
-                # 🎯 获取全量利润矩阵（不放过 54 种可能性的纯数据）
-                # matrix 为一个列表，其中每一项 matrix[i] 格式为：([正向3档利润], [反向3档利润])
+                # 🆕 动态定时体检：每隔 1 小时，主动重新测一下 Balancer 和 Aave 是否健康
+                if time.time() - last_heartbeat_time > 3600:
+                    self._probe_lender_liveness()
+                    last_heartbeat_time = time.time()
+
+                # 🎯 获取全量利润矩阵（54 种可能性的纯数据）
                 matrix = self.contract.functions.checkAllOpportunities().call()
 
                 executed = False
                 for i in range(self.pair_count):
-                    # 检查当前套利对是否在 10 分钟看守禁闭期内
                     jail_time = self.jail_until.get(i, 0)
                     if time.time() < jail_time:
                         continue
 
-                    # 容错：如果获取的数据由于套利对未完全配置而产生越界
                     if i >= len(matrix):
                         continue
 
-                    # 提取正向和反向的原始利润数组
                     profits_true = matrix[i][0]
                     profits_false = matrix[i][1]
 
                     # 🎯 进入矩阵决策分析核心进行计算、复筛与击发
                     if self._process_pair_matrix(i, profits_true, profits_false):
                         executed = True
-                        # 🎯【终极安全盾牌】：打一枪就闪！
-                        # 只要当前轮次成功开火了任意一组套利对，立刻用 break 彻底打碎并跳出多套利对遍历循环！
-                        # 这一行是整个系统的防碰撞安全锁，完美确保了每一个 1.2 秒检测间隔内钱包只发一笔交易，100% 拒绝 Nonce 碰撞死锁！
+                        # 🎯【终极防踩踏安全锁】：打一枪就跑！
+                        # 只要在一轮内成功开火了任意一组，立刻 break 终止！100% 物理避免同区块 Nonce 冲突锁死！
                         break
 
                 if not executed:
@@ -459,4 +499,3 @@ class ArbitrageBot:
 if __name__ == "__main__":
     bot = ArbitrageBot()
     bot.run()
-    
