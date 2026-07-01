@@ -49,7 +49,7 @@ class ArbitrageBot:
         self.w3_secondary = self._init_web3(RPC_URL_2)
         self.use_primary = True
 
-        # 🎯 2. 初始化看守所、失败计数器、未决交易队列（熔断避险机制）
+        # 2. 初始化看守所、失败计数器、未决交易队列（熔断避险机制）
         self.jail_until = {}       # 存储每个对子关禁闭的结束时间戳 {pairId: timestamp}
         self.fail_counters = {}    # 存储每个对子连续链上失败的计数器 {pairId: count}
         self.pending_txs = []      # 存储已经发出但还未确认的交易收据队列 [(tx_hash, pair_id, send_time)]
@@ -79,7 +79,11 @@ class ArbitrageBot:
 
     @property
     def contract(self):
-        """动态合约绑定，自愈核心"""
+        """
+        🎯 属性黑魔法：实现“动态合约绑定”。
+        每次调用 self.contract 时，都会自动使用当前最健康、已切换的活动 w3 实例来创建合约对象。
+        彻底规避 Web3.py 合约实例的“单节点制绑定死锁”！
+        """
         active_w3 = self._get_active_w3()
         return active_w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS),
@@ -126,6 +130,7 @@ class ArbitrageBot:
         decimals = PRECISION.get(precision_key, 10**18)
         return profit / decimals
 
+    # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 10 组参数配置全部通畅
     def _run_diagnostics(self):
         logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的链上连通性...")
         healthy_count = 0
@@ -141,7 +146,7 @@ class ArbitrageBot:
                 if not tiers:
                     logger.error(f"  [套利对 {i}] ❌ 异常：Python 端 config.py 未配置该套利对的 PAIR_BORROW_TIERS")
                     continue
-                borrow_amt = tiers[0]
+                borrow_amt = tiers[0]  # 用第一档测试即可
                 
                 output_alt = self.contract.functions.getOutputAmount(
                     pool_a, protocol_a, token_borrow, token_alt, borrow_amt, fee_a
@@ -159,7 +164,43 @@ class ArbitrageBot:
         
         logger.info(f"📊 自检完成：共 {self.pair_count} 组套利对，其中 {healthy_count} 组处于完美健康状态。")
 
-    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 2次，自动强行熔断
+    # 🎯 动态解剖器，非阻塞地在失败区块的前一个区块执行 eth_call 重放，抓取 Revert 报错
+    def _get_revert_reason(self, tx_hash) -> str:
+        w3 = self._get_active_w3()
+        try:
+            tx = w3.eth.get_transaction(tx_hash)
+            if not tx or 'blockNumber' not in tx:
+                return "无法获取该笔失败交易的链上数据"
+                
+            replay_tx = {
+                'to': tx.get('to'),
+                'from': tx.get('from'),
+                'value': tx.get('value', 0),
+                'data': tx.get('input', '0x'),
+                'gas': tx.get('gas'),
+                'nonce': tx.get('nonce')
+            }
+            
+            # 兼容 EIP-1559 与 Legacy 费率参数
+            if 'get' in dir(tx) and tx.get('gasPrice') is not None:
+                replay_tx['gasPrice'] = tx.get('gasPrice')
+            elif 'maxFeePerGas' in dir(tx) and tx.get('maxFeePerGas') is not None:
+                replay_tx['maxFeePerGas'] = tx.get('maxFeePerGas')
+                replay_tx['maxPriorityFeePerGas'] = tx.get('maxPriorityFeePerGas')
+
+            # 过滤掉 None 值
+            replay_tx = {k: v for k, v in replay_tx.items() if v is not None}
+
+            # 在它发生 Revert 的前一个区块上模拟重放
+            w3.eth.call(replay_tx, tx['blockNumber'] - 1)
+            return "在链下重放模拟中成功（极其诡异，建议检查是否为偶发性滑点）"
+        except Exception as e:
+            err_msg = str(e)
+            if "execution reverted:" in err_msg:
+                return err_msg.split("execution reverted:")[-1].strip()
+            return err_msg
+
+    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 2次，自动强行熔断并打印最真实的 Revert 原因
     def _check_pending_receipts(self):
         if not self.pending_txs:
             return
@@ -173,7 +214,7 @@ class ArbitrageBot:
                 
                 # 交易仍在排队中
                 if receipt is None:
-                    # 容灾：如果在 L2 上发了 60 秒都还没出收据，可能发生卡死，丢弃不再跟踪，防止内存队列膨胀
+                    # L2 超时自愈：防卡死
                     if time.time() - send_time < 60:
                         active_pending.append((tx_hash, pair_id, send_time))
                     else:
@@ -189,9 +230,13 @@ class ArbitrageBot:
                     self.fail_counters[pair_id] = 0
                 elif status == 0:
                     self.fail_counters[pair_id] = self.fail_counters.get(pair_id, 0) + 1
+                    
+                    # 调用解剖器，抓取最真实的 Revert 报错原因
+                    revert_reason = self._get_revert_reason(tx_hash)
+                    
                     logger.warning(
-                        f"❌ [链上回退] 交易在链上执行失败 (Revert) | pairId={pair_id} | "
-                        f"连续失败计数: {self.fail_counters[pair_id]}/2 | Hash: {tx_hash.hex()}"
+                        f"❌ [链上回退] 交易在链上执行失败 (Revert) | pairId={pair_id} |\n"
+                        f"   👉 [详情] 连续失败计数: {self.fail_counters[pair_id]}/2 | 报错原因: {revert_reason} | Hash: {tx_hash.hex()}"
                     )
                     
                     # 🎯 核心熔断判断：触发禁闭 10 分钟 (600秒)
@@ -199,26 +244,33 @@ class ArbitrageBot:
                         self.jail_until[pair_id] = time.time() + 600
                         self.fail_counters[pair_id] = 0 # 进看守所后，清空计数器
                         logger.error(
-                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 2 次开火回退！"
-                            f"   👉 极大概率发生滑点剧烈偏移、池子被毁或合约异常！"
+                            f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 2 次开火回退！\n"
+                            f"   👉 极易发生滑点情景偏移、池子被损坏或合约异常！\n"
                             f"   👉 合约已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！期间绝不进行初筛、不进行开火！"
                         )
 
             except Exception as e:
-                # 发生网络读取错误，保留在队列里，下一轮继续探测
+                # 发生网络读取错误，保留在队列里，下一轮继续
                 active_pending.append((tx_hash, pair_id, send_time))
 
         self.pending_txs = active_pending
 
     def _send_transaction(self, function_call, pair_id: int, borrow_amount: int, profit_normalized: float, direction_str: str, gas_limit: int = 1200000):
+        """
+        🚀 极速直发模式 (Direct Fire Mode)：
+        一刀切除耗时 100ms 的 estimate_gas (精筛) 步骤，
+        直接使用预设的 120 万 Gas 限制，以最快速度直接签名并发射，实现雷霆一击！
+        """
         w3 = self._get_active_w3()
         
+        # 1. 尝试获取 Nonce (如果连不上，向上抛出触发节点自愈切换)
         try:
             nonce = w3.eth.get_transaction_count(self.address, 'pending')
         except Exception as e:
             logger.error(f"❌ [网络异常] 无法获取 Nonce，准备触发节点主备自愈切换: {e}")
             raise e
 
+        # 2. 直接以 0 延迟构建 EIP-1559 真实交易
         try:
             gas_price = w3.eth.gas_price
             max_fee_per_gas = int(gas_price * 2.0)
@@ -233,6 +285,7 @@ class ArbitrageBot:
                 'maxPriorityFeePerGas': max_priority_fee_per_gas,
             })
 
+            # 3. 签名并直接雷霆发射！
             signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
             tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             
@@ -264,7 +317,7 @@ class ArbitrageBot:
                     # 🎯 核心优化：检查当前套利对是否被关了禁闭
                     jail_time = self.jail_until.get(i, 0)
                     if time.time() < jail_time:
-                        # 尚在 10 分钟禁闭期内，完全忽略不予理睬，0 开枪消耗！
+                        # 尚在 10 分钟禁闭期内，直接跳过
                         continue
 
                     profit_raw = best_profits[i]
@@ -300,19 +353,50 @@ class ArbitrageBot:
                         continue
                     borrow_amount = tiers[tier_idx]
 
-                    # 3. 极速直发开火
-                    self._send_transaction(
+                    # 🎯 3. 极速直发开火 (优先使用 0% 手续费的 Balancer)
+                    tx_hash = self._send_transaction(
                         function_call=self.contract.functions.executeArbitrage(
                             i,
                             borrow_amount,
                             directions[i],
-                            True
+                            True  # 优先走 Balancer 闪电贷
                         ),
                         pair_id=i,
                         borrow_amount=borrow_amount,
                         profit_normalized=profit_normalized,
                         direction_str=direction_str
                     )
+                    
+                    # 🎯 4. 【核心大升级】：多贷源自动降级机制！
+                    # 如果 Balancer 闪电贷因为库房没钱、暂时锁定等原因开火失败（返回 None），
+                    # 且此时该对子没有因为刚才的失败达到 2 次而进入看守所禁闭：
+                    # 立即自动进行降级，切换到 Aave V3（useBalancer = False）重新发射！
+                    if tx_hash is None:
+                        # 检查对子是否在刚刚失败的过程中，由于达到了连续 2 次失败而被临时熔断拉进看守所了
+                        current_jail_time = self.jail_until.get(i, 0)
+                        if time.time() < current_jail_time:
+                            # 已经熔断，直接跳过，说明是真实的划扣回退，不属于贷源问题
+                            continue
+                            
+                        logger.info(
+                            f"🔄 [贷源自愈降级] pairId={i} | Balancer 0息通道借贷遇阻，"
+                            f"正在极速自动降级调用 Aave V3 备用通道重试！"
+                        )
+                        
+                        # 瞬间向 Aave V3 备用弹仓发起第二轮雷霆开枪！
+                        self._send_transaction(
+                            function_call=self.contract.functions.executeArbitrage(
+                                i,
+                                borrow_amount,
+                                directions[i],
+                                False  # 走 Aave V3 闪电贷 (0.05% 手续费)
+                            ),
+                            pair_id=i,
+                            borrow_amount=borrow_amount,
+                            profit_normalized=profit_normalized,
+                            direction_str=direction_str
+                        )
+
                     executed = True
 
                 if not executed:
