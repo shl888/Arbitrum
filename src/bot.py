@@ -130,14 +130,16 @@ class ArbitrageBot:
         decimals = PRECISION.get(precision_key, 10**18)
         return profit / decimals
 
-    # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 10 组参数配置全部通畅
+    # 🎯 自检诊断雷达：保持 getOutputAmount 连通性测试通畅
     def _run_diagnostics(self):
-        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的链上连通性...")
+        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试各套利对的链上连通性...")
         healthy_count = 0
         for i in range(self.pair_count):
             try:
                 pair_config = self.contract.functions.pairs(i).call()
                 pool_a, pool_b = pair_config[0], pair_config[1]
+                if pool_a == "0x0000000000000000000000000000000000000000":
+                    continue # 完美包容空指针（比如 pairId=0 的情况）
                 protocol_a, protocol_b = pair_config[2], pair_config[3]
                 fee_a, fee_b = pair_config[6], pair_config[7]
                 token_borrow, token_alt = pair_config[8], pair_config[9]
@@ -160,12 +162,11 @@ class ArbitrageBot:
                 logger.info(f"  [套利对 {i}] ✅ 状态健康，参数配置已就位！")
             except Exception as e:
                 logger.error(f"  [套利对 {i}] ❌ 状态异常！该套利对在链上调用会发生 Revert！报错原因: {e}")
-                logger.warning(f"  👉 解决办法：请检查你在 Remix 写入第 {i} 组数据时，是否把池子地址或代币地址输错了。请直接在 Remix 里对 pairId={i} 重新调用 setPairConfig 进行覆盖，无需重新部署合约！")
+                logger.warning(f"  👉 解决办法：请检查配置，并在 Remix 重新调用 setPairConfig 覆盖！")
         
-        logger.info(f"📊 自检完成：共 {self.pair_count} 组套利对，其中 {healthy_count} 组处于完美健康状态。")
+        logger.info(f"📊 自检完成：共检测到配置的有效套利对中，有 {healthy_count} 组处于完美健康状态。")
 
-    # 🎯【核心大升级】：动态解剖器，非阻塞地在最新状态（latest）执行 eth_call 重放。
-    # 彻底解决由于普通免费节点没有历史归档数据（n-1）限制而导致的解析失败！
+    # 🎯 动态解剖器：非阻塞地在最新状态（latest）执行 eth_call 重放，并增加原始 Hex 自动解码功能
     def _get_revert_reason(self, tx_hash) -> str:
         w3 = self._get_active_w3()
         try:
@@ -182,27 +183,44 @@ class ArbitrageBot:
                 'nonce': tx.get('nonce')
             }
             
-            # 兼容 EIP-1559 与 Legacy 费率参数
-            if 'get' in dir(tx) and tx.get('gasPrice') is not None:
+            if tx.get('gasPrice') is not None:
                 replay_tx['gasPrice'] = tx.get('gasPrice')
-            elif 'maxFeePerGas' in dir(tx) and tx.get('maxFeePerGas') is not None:
+            elif tx.get('maxFeePerGas') is not None:
                 replay_tx['maxFeePerGas'] = tx.get('maxFeePerGas')
                 replay_tx['maxPriorityFeePerGas'] = tx.get('maxPriorityFeePerGas')
 
-            # 过滤掉 None 值
             replay_tx = {k: v for k, v in replay_tx.items() if v is not None}
 
-            # 🎯 核心改变：直接在最新状态（latest）下进行只读模拟重放，100% 成功提取底层 Revert 报错！
+            # 链下重放模拟
             w3.eth.call(replay_tx, 'latest')
             return "在链下重放模拟中成功（极其诡异，建议检查是否为偶发性滑点）"
         except Exception as e:
+            # 🎯 升级：主动从小狐狸/节点的底层报错对象中扣出 Hex Data，进行精准解码
+            raw_data = None
+            if hasattr(e, 'data'):
+                raw_data = e.data
+            elif isinstance(e.args, tuple) and len(e.args) > 0 and isinstance(e.args[0], dict):
+                raw_data = e.args[0].get('data')
+
+            if raw_data:
+                if isinstance(raw_data, str) and raw_data.startswith('0x'):
+                    try:
+                        # 0x08c379a0 为标准的 Error(string) 报错 Selector 签名
+                        if raw_data.startswith('0x08c379a0'):
+                            decoded = w3.codec.decode(['string'], bytes.fromhex(raw_data[10:]))
+                            return f"解密底层报错: {decoded[0]}"
+                        else:
+                            return f"原始报错 Hex (非标/自定义错误，可在Arbiscan对齐): {raw_data}"
+                    except Exception as decode_err:
+                        return f"解析报错Hex失败: {raw_data} | Error: {decode_err}"
+                return f"底层异常原始数据: {raw_data}"
+
             err_msg = str(e)
             if "execution reverted:" in err_msg:
-                # 提取合约返回的真实报错文本 (如 "Balancer flashloan failed: Arbitrage unprofitable")
                 return err_msg.split("execution reverted:")[-1].strip()
             return err_msg
 
-    # 🎯 核心升级：异步非阻塞收据追踪，一旦发现某个对子在链上连续 Revert 2次，自动强行熔断，并调用 _get_revert_reason 解析具体报错
+    # 🎯 异步非阻塞收据追踪，一旦发现某个对子连续 Revert 2次，自动熔断看守
     def _check_pending_receipts(self):
         if not self.pending_txs:
             return
@@ -214,26 +232,22 @@ class ArbitrageBot:
             try:
                 receipt = w3.eth.get_transaction_receipt(tx_hash)
                 
-                # 交易仍在排队中
+                # 交易仍在定序器排队中
                 if receipt is None:
-                    # L2 超时自愈：防卡死
                     if time.time() - send_time < 60:
                         active_pending.append((tx_hash, pair_id, send_time))
                     else:
-                        logger.warning(f"⏳ 交易超时未被定序器打包，放弃跟踪其收据。Hash: {tx_hash.hex()}")
+                        logger.warning(f"⏳ 交易超时未被定序器打包，放弃跟踪。Hash: {tx_hash.hex()}")
                     continue
                 
-                # 收到链上执行回执！
+                # 收到链上执行回执
                 status = receipt.get('status')
                 
                 if status == 1:
                     logger.info(f"💰 [大吉大利！] 链上套利交易已成功确认并平仓获利！Hash: {tx_hash.hex()}")
-                    # 只要有一次成功，立刻清空该对子的失败计数
-                    self.fail_counters[pair_id] = 0
+                    self.fail_counters[pair_id] = 0 # 清空失败计数
                 elif status == 0:
                     self.fail_counters[pair_id] = self.fail_counters.get(pair_id, 0) + 1
-                    
-                    # 🎯【核心大合并】：调用升级后的动态解剖器，抓取并解析最底层的 Revert 原因，彻底打碎黑盒！
                     revert_reason = self._get_revert_reason(tx_hash)
                     
                     logger.warning(
@@ -241,38 +255,33 @@ class ArbitrageBot:
                         f"   👉 [详情] 连续失败计数: {self.fail_counters[pair_id]}/2 | 报错原因: {revert_reason} | Hash: {tx_hash.hex()}"
                     )
                     
-                    # 🎯 核心熔断判断：触发禁闭 10 分钟 (600秒)
+                    # 触发 10 分钟禁闭熔断
                     if self.fail_counters[pair_id] >= 2:
                         self.jail_until[pair_id] = time.time() + 600
-                        self.fail_counters[pair_id] = 0 # 进看守所后，清空计数器
+                        self.fail_counters[pair_id] = 0
                         logger.error(
                             f"🛑 [!!! 紧急熔断 !!!] 套利对 {pair_id} 连续 2 次开火回退！\n"
                             f"   👉 诊断书结果: {revert_reason} \n"
-                            f"   👉 合约已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！期间绝不进行初筛、不进行开火！"
+                            f"   👉 已自动将该套利对拉入【冷冻看守所】隔离 10 分钟！"
                         )
 
             except Exception as e:
-                # 发生网络读取错误，保留在队列里，下一轮继续
                 active_pending.append((tx_hash, pair_id, send_time))
 
         self.pending_txs = active_pending
 
     def _send_transaction(self, function_call, pair_id: int, borrow_amount: int, profit_normalized: float, direction_str: str, gas_limit: int = 1200000):
         """
-        🚀 极速直发模式 (Direct Fire Mode)：
-        一刀切除耗时 100ms 的 estimate_gas (精筛) 步骤，
-        直接使用预设的 120 万 Gas 限制，以最快速度直接签名并发射，实现雷霆一击！
+        🚀 极速直发模式 (Direct Fire Mode)：直接以预设 120 万 Gas 限制直发，实现雷霆一击
         """
         w3 = self._get_active_w3()
         
-        # 1. 尝试获取 Nonce (如果连不上，向上抛出触发节点自愈切换)
         try:
             nonce = w3.eth.get_transaction_count(self.address, 'pending')
         except Exception as e:
             logger.error(f"❌ [网络异常] 无法获取 Nonce，准备触发节点主备自愈切换: {e}")
             raise e
 
-        # 2. 直接以 0 延迟构建 EIP-1559 真实交易
         try:
             gas_price = w3.eth.gas_price
             max_fee_per_gas = int(gas_price * 2.0)
@@ -287,7 +296,6 @@ class ArbitrageBot:
                 'maxPriorityFeePerGas': max_priority_fee_per_gas,
             })
 
-            # 3. 签名并直接雷霆发射！
             signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
             tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             
@@ -297,109 +305,137 @@ class ArbitrageBot:
                 f"预计纯利润={profit_normalized:.6f} | 交易Hash: {tx_hash.hex()}"
             )
             
-            # 🎯 登记到未决交易队列中，以便在后台异步监测它的执行结果，防止死循环空枪放血
             self.pending_txs.append((tx_hash, pair_id, time.time()))
             return tx_hash
         except Exception as e:
             logger.error(f"❌ [开火失败] 交易在签名或发送阶段发生错误，放弃本次发射: {e}")
             return None
 
+    def _process_pair_matrix(self, pair_id: int, profits_true: list, profits_false: list) -> bool:
+        """
+        🎯 核心决策模块：全量矩阵分析
+        针对第 pair_id 组套利对的双向利润，从【档位0到最大档位】顺序扫描，
+        寻找第一个满足“安全优先（滑点最小）”且跑赢 Gas 利润门槛的档位进行击发！
+        """
+        if not profits_true or not profits_false:
+            return False
+
+        # 读取该套利对对应的本位币过滤门槛
+        threshold_type = PAIR_THRESHOLD_TYPE.get(pair_id, 'WETH')
+        if threshold_type == 'WETH':
+            threshold = MIN_PROFIT_THRESHOLD_WETH
+        else:
+            threshold = MIN_PROFIT_THRESHOLD_WBTC
+
+        # 1. 优先扫描检测正向 (True: A → B)
+        for tier_idx, profit_raw in enumerate(profits_true):
+            if profit_raw == 0:
+                continue
+            
+            profit_normalized = self._normalize_profit(profit_raw, pair_id)
+            if profit_normalized >= threshold:
+                direction_str = 'A→B'
+                logger.info(
+                    f"🔥 [矩阵复筛通过] 发现高价值套利机会！ | pairId={pair_id} | "
+                    f"锁定【最小安全档位 {tier_idx}】 | 预计利润={profit_normalized:.6f} | 方向={direction_str}"
+                )
+                return self._fire_arbitrage(pair_id, tier_idx, True, profit_normalized, direction_str)
+
+        # 2. 其次扫描检测反向 (False: B → A)
+        for tier_idx, profit_raw in enumerate(profits_false):
+            if profit_raw == 0:
+                continue
+            
+            profit_normalized = self._normalize_profit(profit_raw, pair_id)
+            if profit_normalized >= threshold:
+                direction_str = 'B→A'
+                logger.info(
+                    f"🔥 [矩阵复筛通过] 发现高价值套利机会！ | pairId={pair_id} | "
+                    f"锁定【最小安全档位 {tier_idx}】 | 预计利润={profit_normalized:.6f} | 方向={direction_str}"
+                )
+                return self._fire_arbitrage(pair_id, tier_idx, False, profit_normalized, direction_str)
+
+        return False
+
+    def _fire_arbitrage(self, pair_id: int, tier_idx: int, direction: bool, profit_normalized: float, direction_str: str) -> bool:
+        """
+        🎯 开火总控：打包交易指令，并内建多贷源（Balancer 0息 / Aave备用）自动容灾降级
+        """
+        tiers = PAIR_BORROW_TIERS.get(pair_id)
+        if not tiers or tier_idx >= len(tiers):
+            logger.error(f"❌ 资金档位读取越界: pairId={pair_id}, tierIdx={tier_idx}")
+            return False
+        borrow_amount = tiers[tier_idx]
+
+        # 优先使用 0% 手续费的 Balancer 通道极速开火
+        tx_hash = self._send_transaction(
+            function_call=self.contract.functions.executeArbitrage(
+                pair_id,
+                borrow_amount,
+                direction,
+                True  # useBalancer = True
+            ),
+            pair_id=pair_id,
+            borrow_amount=borrow_amount,
+            profit_normalized=profit_normalized,
+            direction_str=direction_str
+        )
+        
+        # 降级容灾：如果 Balancer 因为各种不可抗力借不出来，且该套利对未被禁闭
+        if tx_hash is None:
+            current_jail_time = self.jail_until.get(pair_id, 0)
+            if time.time() < current_jail_time:
+                return False # 已经在上面失败的处理中被熔断拉进看守所了
+                
+            logger.info(
+                f"🔄 [贷源自愈降级] pairId={pair_id} | Balancer 0息通道借贷遇阻，"
+                f"正在极速自动降级调用 Aave V3 备用通道重试！"
+            )
+            
+            # 瞬间向 Aave V3 发起第二轮雷霆狙击
+            self._send_transaction(
+                function_call=self.contract.functions.executeArbitrage(
+                    pair_id,
+                    borrow_amount,
+                    direction,
+                    False  # useBalancer = False (调用 Aave)
+                ),
+                pair_id=pair_id,
+                borrow_amount=borrow_amount,
+                profit_normalized=profit_normalized,
+                direction_str=direction_str
+            )
+        return True
+
     def run(self):
-        logger.info("📡 雷达扫描已开启，正在进行全量初筛/超频盲冲检测...")
+        logger.info("📡 雷达扫描已开启，正在进行全量二维矩阵初筛/超频盲冲检测...")
         while True:
             try:
-                # 🎯 核心参数对齐：每次循环的最开头，先异步结算所有排队中的交易结果，更新看守所名单
+                # 🎯 每次扫描前，先异步结算所有排队中的交易结果，更新看守所名单
                 self._check_pending_receipts()
 
-                result = self.contract.functions.checkAllOpportunities().call()
-                best_tiers, best_profits, directions = result
+                # 🎯 获取全量利润矩阵（不放过 54 种可能性的纯数据）
+                # matrix 为一个列表，其中每一项 matrix[i] 格式为：([正向3档利润], [反向3档利润])
+                matrix = self.contract.functions.checkAllOpportunities().call()
 
                 executed = False
                 for i in range(self.pair_count):
-                    # 🎯 核心优化：检查当前套利对是否被关了禁闭
+                    # 检查当前套利对是否在 10 分钟看守禁闭期内
                     jail_time = self.jail_until.get(i, 0)
                     if time.time() < jail_time:
-                        # 尚在 10 分钟禁闭期内，直接跳过
                         continue
 
-                    profit_raw = best_profits[i]
-                    if profit_raw == 0:
+                    # 容错：如果获取的数据由于套利对未完全配置而产生越界
+                    if i >= len(matrix):
                         continue
 
-                    profit_normalized = self._normalize_profit(profit_raw, i)
+                    # 提取正向和反向的原始利润数组
+                    profits_true = matrix[i][0]
+                    profits_false = matrix[i][1]
 
-                    # 根据套利对类型选择对应的利润阈值
-                    threshold_type = PAIR_THRESHOLD_TYPE.get(i, 'WETH')
-                    if threshold_type == 'WETH':
-                        threshold = MIN_PROFIT_THRESHOLD_WETH
-                    else:
-                        threshold = MIN_PROFIT_THRESHOLD_WBTC
-
-                    # 2. 复筛过滤
-                    if profit_normalized < threshold:
-                        continue
-
-                    direction_str = 'A→B' if directions[i] else 'B→A'
-                    logger.info(
-                        f"🔥 [复筛通过] 发现高价值套利机会！ | pairId={i} | 最佳资金档位={best_tiers[i]} | "
-                        f"估算利润={profit_normalized:.6f} | 方向={direction_str}"
-                    )
-
-                    tier_idx = best_tiers[i]
-                    if tier_idx == 99:
-                        continue
-
-                    tiers = PAIR_BORROW_TIERS.get(i)
-                    if not tiers or tier_idx >= len(tiers):
-                        logger.error(f"❌ 资金档位读取越界: pairId={i}, tierIdx={tier_idx}")
-                        continue
-                    borrow_amount = tiers[tier_idx]
-
-                    # 3. 极速直发开火 (优先使用 0% 手续费的 Balancer)
-                    tx_hash = self._send_transaction(
-                        function_call=self.contract.functions.executeArbitrage(
-                            i,
-                            borrow_amount,
-                            directions[i],
-                            True  # 优先走 Balancer 闪电贷
-                        ),
-                        pair_id=i,
-                        borrow_amount=borrow_amount,
-                        profit_normalized=profit_normalized,
-                        direction_str=direction_str
-                    )
-                    
-                    # 🎯 4. 【核心大升级】：多贷源自动降级机制！
-                    # 如果 Balancer 闪电贷因为库房没钱、暂时锁定等原因开火失败（返回 None），
-                    # 且此时该对子没有因为刚才的失败达到 2 次而进入看守所禁闭：
-                    # 立即自动进行降级，切换到 Aave V3（useBalancer = False）重新发射！
-                    if tx_hash is None:
-                        # 检查对子是否在刚刚失败的过程中，由于达到了连续 2 次失败而被临时熔断拉进看守所了
-                        current_jail_time = self.jail_until.get(i, 0)
-                        if time.time() < current_jail_time:
-                            # 已经熔断，直接跳过，说明是真实的划扣回退，不属于贷源问题
-                            continue
-                            
-                        logger.info(
-                            f"🔄 [贷源自愈降级] pairId={i} | Balancer 0息通道借贷遇阻，"
-                            f"正在极速自动降级调用 Aave V3 备用通道重试！"
-                        )
-                        
-                        # 瞬间向 Aave V3 备用弹仓发起第二轮雷霆开枪！
-                        self._send_transaction(
-                            function_call=self.contract.functions.executeArbitrage(
-                                i,
-                                borrow_amount,
-                                directions[i],
-                                False  # 走 Aave V3 闪电贷 (0.05% 手续费)
-                            ),
-                            pair_id=i,
-                            borrow_amount=borrow_amount,
-                            profit_normalized=profit_normalized,
-                            direction_str=direction_str
-                        )
-
-                    executed = True
+                    # 🎯 进入矩阵决策分析核心进行计算、复筛与击发
+                    if self._process_pair_matrix(i, profits_true, profits_false):
+                        executed = True
 
                 if not executed:
                     sys.stdout.write('.')
@@ -412,7 +448,6 @@ class ArbitrageBot:
                 break
             except Exception as e:
                 logger.error(f"🚨 主循环异常: {e}")
-                # 只有真正的 RPC 崩溃，才会触发主备自动切换
                 self._switch_node()
                 time.sleep(CHECK_INTERVAL)
 

@@ -297,19 +297,21 @@
 		"name": "checkAllOpportunities",
 		"outputs": [
 			{
-				"internalType": "uint256[]",
-				"name": "bestTiers",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "bestProfits",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "bool[]",
-				"name": "directions",
-				"type": "bool[]"
+				"components": [
+					{
+						"internalType": "uint256[]",
+						"name": "profitsTrue",
+						"type": "uint256[]"
+					},
+					{
+						"internalType": "uint256[]",
+						"name": "profitsFalse",
+						"type": "uint256[]"
+					}
+				],
+				"internalType": "struct ArbitrageGoldMiner.PairProfitMatrix[]",
+				"name": "matrix",
+				"type": "tuple[]"
 			}
 		],
 		"stateMutability": "view",
