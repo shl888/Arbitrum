@@ -436,6 +436,10 @@ class ArbitrageBot:
                     # 🎯 进入矩阵决策分析核心进行计算、复筛与击发
                     if self._process_pair_matrix(i, profits_true, profits_false):
                         executed = True
+                        # 🎯【终极安全盾牌】：打一枪就闪！
+                        # 只要当前轮次成功开火了任意一组套利对，立刻用 break 彻底打碎并跳出多套利对遍历循环！
+                        # 这一行是整个系统的防碰撞安全锁，完美确保了每一个 1.2 秒检测间隔内钱包只发一笔交易，100% 拒绝 Nonce 碰撞死锁！
+                        break
 
                 if not executed:
                     sys.stdout.write('.')
@@ -455,3 +459,4 @@ class ArbitrageBot:
 if __name__ == "__main__":
     bot = ArbitrageBot()
     bot.run()
+    
