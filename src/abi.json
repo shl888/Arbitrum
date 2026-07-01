@@ -42,80 +42,6 @@
 		"type": "event"
 	},
 	{
-		"anonymous": false,
-		"inputs": [
-			{
-				"indexed": true,
-				"internalType": "uint256",
-				"name": "pairId",
-				"type": "uint256"
-			},
-			{
-				"indexed": false,
-				"internalType": "address",
-				"name": "poolA",
-				"type": "address"
-			},
-			{
-				"indexed": false,
-				"internalType": "address",
-				"name": "poolB",
-				"type": "address"
-			}
-		],
-		"name": "PairConfigUpdated",
-		"type": "event"
-	},
-	{
-		"inputs": [],
-		"name": "AAVE_POOL",
-		"outputs": [
-			{
-				"internalType": "address",
-				"name": "",
-				"type": "address"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [],
-		"name": "BALANCER_VAULT",
-		"outputs": [
-			{
-				"internalType": "address",
-				"name": "",
-				"type": "address"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [],
-		"name": "checkAllOpportunities",
-		"outputs": [
-			{
-				"internalType": "uint256[]",
-				"name": "bestTiers",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "bestProfits",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "bool[]",
-				"name": "directions",
-				"type": "bool[]"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
 		"inputs": [
 			{
 				"internalType": "uint256",
@@ -180,6 +106,213 @@
 			}
 		],
 		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "pairId",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "address",
+				"name": "poolA",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "address",
+				"name": "poolB",
+				"type": "address"
+			}
+		],
+		"name": "PairConfigUpdated",
+		"type": "event"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address[]",
+				"name": "",
+				"type": "address[]"
+			},
+			{
+				"internalType": "uint256[]",
+				"name": "amounts",
+				"type": "uint256[]"
+			},
+			{
+				"internalType": "uint256[]",
+				"name": "feeAmounts",
+				"type": "uint256[]"
+			},
+			{
+				"internalType": "bytes",
+				"name": "userData",
+				"type": "bytes"
+			}
+		],
+		"name": "receiveFlashLoan",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "_operator",
+				"type": "address"
+			}
+		],
+		"name": "setOperator",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "pairId",
+				"type": "uint256"
+			},
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "poolA",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "poolB",
+						"type": "address"
+					},
+					{
+						"internalType": "uint8",
+						"name": "protocolA",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint8",
+						"name": "protocolB",
+						"type": "uint8"
+					},
+					{
+						"internalType": "address",
+						"name": "routerA",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "routerB",
+						"type": "address"
+					},
+					{
+						"internalType": "uint24",
+						"name": "feeA",
+						"type": "uint24"
+					},
+					{
+						"internalType": "uint24",
+						"name": "feeB",
+						"type": "uint24"
+					},
+					{
+						"internalType": "address",
+						"name": "tokenBorrow",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "tokenAlt",
+						"type": "address"
+					},
+					{
+						"internalType": "uint256[]",
+						"name": "borrowTiers",
+						"type": "uint256[]"
+					}
+				],
+				"internalType": "struct ArbitrageGoldMiner.ArbPair",
+				"name": "config",
+				"type": "tuple"
+			}
+		],
+		"name": "setPairConfig",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "newOwner",
+				"type": "address"
+			}
+		],
+		"name": "transferOwnership",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"stateMutability": "payable",
+		"type": "receive"
+	},
+	{
+		"inputs": [],
+		"name": "AAVE_POOL",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "BALANCER_VAULT",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "checkAllOpportunities",
+		"outputs": [
+			{
+				"internalType": "uint256[]",
+				"name": "bestTiers",
+				"type": "uint256[]"
+			},
+			{
+				"internalType": "uint256[]",
+				"name": "bestProfits",
+				"type": "uint256[]"
+			},
+			{
+				"internalType": "bool[]",
+				"name": "directions",
+				"type": "bool[]"
+			}
+		],
+		"stateMutability": "view",
 		"type": "function"
 	},
 	{
@@ -347,138 +480,5 @@
 		],
 		"stateMutability": "view",
 		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address[]",
-				"name": "",
-				"type": "address[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "amounts",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "feeAmounts",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "bytes",
-				"name": "userData",
-				"type": "bytes"
-			}
-		],
-		"name": "receiveFlashLoan",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "_operator",
-				"type": "address"
-			}
-		],
-		"name": "setOperator",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "uint256",
-				"name": "pairId",
-				"type": "uint256"
-			},
-			{
-				"components": [
-					{
-						"internalType": "address",
-						"name": "poolA",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "poolB",
-						"type": "address"
-					},
-					{
-						"internalType": "uint8",
-						"name": "protocolA",
-						"type": "uint8"
-					},
-					{
-						"internalType": "uint8",
-						"name": "protocolB",
-						"type": "uint8"
-					},
-					{
-						"internalType": "address",
-						"name": "routerA",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "routerB",
-						"type": "address"
-					},
-					{
-						"internalType": "uint24",
-						"name": "feeA",
-						"type": "uint24"
-					},
-					{
-						"internalType": "uint24",
-						"name": "feeB",
-						"type": "uint24"
-					},
-					{
-						"internalType": "address",
-						"name": "tokenBorrow",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "tokenAlt",
-						"type": "address"
-					},
-					{
-						"internalType": "uint256[]",
-						"name": "borrowTiers",
-						"type": "uint256[]"
-					}
-				],
-				"internalType": "struct ArbitrageGoldMiner.ArbPair",
-				"name": "config",
-				"type": "tuple"
-			}
-		],
-		"name": "setPairConfig",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "newOwner",
-				"type": "address"
-			}
-		],
-		"name": "transferOwnership",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"stateMutability": "payable",
-		"type": "receive"
 	}
 ]

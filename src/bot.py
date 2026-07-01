@@ -132,7 +132,7 @@ class ArbitrageBot:
 
     # 🎯 自检诊断雷达：自检阶段同样使用动态 contract，保障 10 组参数配置全部通畅
     def _run_diagnostics(self):
-        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 10 组套利对的链上连通性...")
+        logger.info("⚙️ 正在启动'装填全自检诊断雷达'，逐一测试 所有组套利对的链上连通性...")
         healthy_count = 0
         for i in range(self.pair_count):
             try:
