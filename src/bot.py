@@ -10,8 +10,7 @@ from config import (
     RPC_URL_2,
     PRIVATE_KEY,
     CONTRACT_ADDRESS,
-    MIN_PROFIT_THRESHOLD_WETH,
-    MIN_PROFIT_THRESHOLD_WBTC,
+    PAIR_MIN_PROFIT_OVERRIDE,  # 🆕 导入每组套利对的专属独立门槛字典
     CHECK_INTERVAL,
     PRECISION,
     PAIR_PRECISION,
@@ -355,14 +354,21 @@ class ArbitrageBot:
             return None
 
     def _process_pair_matrix(self, pair_id: int, profits_true: list, profits_false: list) -> bool:
+        """
+        🎯 核心决策模块：全量矩阵分析
+        针对第 pair_id 组套利对的双向利润，从【档位0到最大档位】顺序扫描，
+        寻找第一个满足“安全优先（滑点最小）”且跑赢【该对子自定义专属/全局默认】门槛的档位进行击发！
+        """
         if not profits_true or not profits_false:
             return False
 
-        threshold_type = PAIR_THRESHOLD_TYPE.get(pair_id, 'WETH')
-        if threshold_type == 'WETH':
-            threshold = MIN_PROFIT_THRESHOLD_WETH
-        else:
-            threshold = MIN_PROFIT_THRESHOLD_WBTC
+        # 🆕 动态精准控险：优先读取该套利对专属的自定义门槛
+        threshold = PAIR_MIN_PROFIT_OVERRIDE.get(pair_id)
+        
+        # 🛡️ 极速防漏空阻断：如果该对子在 config.py 中漏配了，则给出一个绝对安全的默认门槛
+        if threshold is None:
+            threshold_type = PAIR_THRESHOLD_TYPE.get(pair_id, 'WETH')
+            threshold = 0.0003 if threshold_type == 'WETH' else 0.000008
 
         # 1. 优先扫描检测正向 (True: A → B)
         for tier_idx, profit_raw in enumerate(profits_true):
@@ -374,7 +380,7 @@ class ArbitrageBot:
                 direction_str = 'A→B'
                 logger.info(
                     f"🔥 [矩阵复筛通过] 发现高价值套利机会！ | pairId={pair_id} | "
-                    f"锁定【最小安全档位 {tier_idx}】 | 预计利润={profit_normalized:.6f} | 方向={direction_str}"
+                    f"锁定【最小安全档位 {tier_idx}】 | 预计利润={profit_normalized:.6f} (对齐独立门槛={threshold:.6f}) | 方向={direction_str}"
                 )
                 return self._fire_arbitrage(pair_id, tier_idx, True, profit_normalized, direction_str)
 
@@ -388,7 +394,7 @@ class ArbitrageBot:
                 direction_str = 'B→A'
                 logger.info(
                     f"🔥 [矩阵复筛通过] 发现高价值套利机会！ | pairId={pair_id} | "
-                    f"锁定【最小安全档位 {tier_idx}】 | 预计利润={profit_normalized:.6f} | 方向={direction_str}"
+                    f"锁定【最小安全档位 {tier_idx}】 | 预计利润={profit_normalized:.6f} (对齐独立门槛={threshold:.6f}) | 方向={direction_str}"
                 )
                 return self._fire_arbitrage(pair_id, tier_idx, False, profit_normalized, direction_str)
 
@@ -499,3 +505,4 @@ class ArbitrageBot:
 if __name__ == "__main__":
     bot = ArbitrageBot()
     bot.run()
+    

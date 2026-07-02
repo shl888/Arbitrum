@@ -4,20 +4,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# RPC 节点
+# 环境变量：RPC 节点
 RPC_URL_1 = os.getenv('ARBITRUM_RPC_URL_1')
 RPC_URL_2 = os.getenv('ARBITRUM_RPC_URL_2')
+# 环境变量：钱包私钥
 PRIVATE_KEY = os.getenv('OPERATOR_PRIVATE_KEY')
+# 环境变量：套利合约地址
 CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
-
-# 最小利润门槛（币本位）
-# 取自至少能够覆盖gas费，可自定义。
-# 这是服务器程序，对套利合约的初筛结果，进行复筛用的，因为初筛的通过标准，只是理论利润大于0，但是未必值得交易，所以有了复筛，通过复筛门槛的套利机会，会被直接执行真实交易。
-# WETH 本位（第1-6组）：0.0003 WETH ≈ 0.5 美元
-# WBTC 本位（第7-9组）：0.000008 WBTC ≈ 0.5 美元
-MIN_PROFIT_THRESHOLD_WETH = float(os.getenv('MIN_PROFIT_THRESHOLD_WETH', 0.0006))
-MIN_PROFIT_THRESHOLD_WBTC = float(os.getenv('MIN_PROFIT_THRESHOLD_WBTC', 0.000016))
-
+# 环境变量：套利合约的初筛频率，默认1.2秒
 CHECK_INTERVAL = float(os.getenv('CHECK_INTERVAL', 1.2))
 
 # 代币精度映射（用于归一化 bestProfits）
@@ -52,11 +46,11 @@ PAIR_THRESHOLD_TYPE = {
     8: 'WBTC',
 }
 
+
 # 在 Python 端对齐 setPairConfig 中配置的真实物理档位，这里的档位是套利合约所使用的参数副本，是用来映射，用来解决套利合约失忆，记不住初筛，精筛时所用档位的机制的问题。必须与套利合约所用的参数一致。
 """
 换算公式
-```
-借款金额计算基数：小池子的最小库存币的库存美元额度
+借款额计算基数：小池子的最小库存币的库存美元额度
 借款金额的3个档位的比例：
 5万以下，0.5％-1％-1.5％
 5--10万，1％-1.5％-2％
@@ -64,7 +58,6 @@ PAIR_THRESHOLD_TYPE = {
 借款金额（美元）= 计算基数（美元）* 对应比例
 借款数量 = 美元金额 / 代币价格
 借款的最小单位整数 = 借款数量 × 精度
-```
 · WETH / PENDLE / weETH：精度 18 位，归一化值直接以 wei 为单位。
 · WBTC：精度 8 位，归一化值以 satoshi 为单位。
 """
@@ -81,6 +74,24 @@ PAIR_BORROW_TIERS = {
      8: [2690200, 5380410, 8070610]                               # 16万，1％-2％-3％ WBTC
 }
 
+# ==================== 🆕 每组套利对专属最小利润门槛 (Env 优先，Config 兜底) ====================
+# 你可以根据每组套利对池子的大小，在 .env 里通过 'PAIR_组号_MIN_PROFIT' 随时微调某组的门槛。
+# 比如大池子设高（防滑点磨损），小池子设低（高频抓肉）。
+# 如果 .env 里面没写该变量，则系统全自动 fallback 退化到下面的本地硬编码默认值！
+# 只有通过门槛的复筛，才能有交易资格，而交易资格的参数设定，是以通过门槛的最小档位来定。
+
+PAIR_MIN_PROFIT_OVERRIDE = {
+    0: float(os.getenv('PAIR_0_MIN_PROFIT', 0.0003)),   # WETH/ARB    (约 1 美元 - 4万池，低门槛)
+    1: float(os.getenv('PAIR_1_MIN_PROFIT', 0.0012)),   # WETH/LINK   (约 4 美元 - 10万池，高门槛)
+    2: float(os.getenv('PAIR_2_MIN_PROFIT', 0.0003)),   # WETH/GMX    (约 1 美元 - 4万池，低门槛)
+    3: float(os.getenv('PAIR_3_MIN_PROFIT', 0.0003)),   # WETH/AAVE   (约 1 美元 - 1万小池但 Pancake V3 容易滑，设高门槛防回滚)
+    4: float(os.getenv('PAIR_4_MIN_PROFIT', 0.0003)),   # weETH/WETH  (约 1 美元 - 4万池)
+    5: float(os.getenv('PAIR_5_MIN_PROFIT', 0.003)),   # PENDLE/WETH (约 10 美元 - 35万池，大额套利设高门槛)
+    6: float(os.getenv('PAIR_6_MIN_PROFIT', 0.000048)), # WBTC/EVA    (以 WBTC 精度计算，约 3 美元 - 8万池)
+    7: float(os.getenv('PAIR_7_MIN_PROFIT', 0.000016)), # WBTC/cbBTC  (以 WBTC 精度计算，约 1 美元 - 3万池)
+    8: float(os.getenv('PAIR_8_MIN_PROFIT', 0.00008)),  # WBTC/tBTC   (以 WBTC 精度计算，约 5 美元 - 16万大池，设高门槛)
+}
+
 # 自动读取同目录下的 abi.json
 current_dir = os.path.dirname(os.path.abspath(__file__))
 abi_path = os.path.join(current_dir, 'abi.json')
@@ -89,3 +100,4 @@ try:
         CONTRACT_ABI = json.load(f)
 except Exception as e:
     raise FileNotFoundError(f"无法加载 {abi_path}，请确保已将 Remix 的 ABI 导出放入：{e}")
+    
